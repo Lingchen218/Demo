@@ -2,9 +2,11 @@
 //
 
 #include <iostream>
-// #include <string.h>
+ #include <stdio.h>
+#include <stdlib.h>
 #include <Windows.h>
 #include<TlHelp32.h>
+#include<string.h>
 #include"FileName.h"
 #include"crc32.h"
 // 反调试学习
@@ -141,27 +143,71 @@ EXCEPTION_DISPOSITION WINAPI myExceptHandler(
 //    // 这里是crc32 计算，还没写，先忽略，
 //    return 0;
 //}
+using FnAddVectoredExceptionHandler =  PVOID(NTAPI* )(ULONG, _EXCEPTION_POINTERS*);
+
+LONG NTAPI VEH_VectExcepHandler(PEXCEPTION_POINTERS pExcepInfo)
+{
+    MessageBox(NULL, L"VEH异常处理函数执行了...", L"VEH异常", MB_OK);
+
+    if (pExcepInfo->ExceptionRecord->ExceptionCode == 0xC0000094)//除0异常
+    {
+        //将除数修改为1
+        pExcepInfo->ContextRecord->Ecx = 1;
+
+        //修改发生异常的代码的Eip    idiv ecx长度2字节 从下一行开始执行
+        pExcepInfo->ContextRecord->Eip = pExcepInfo->ContextRecord->Eip + 2;
+
+        return EXCEPTION_CONTINUE_EXECUTION;//异常已处理
+    }
+    else if (pExcepInfo->ExceptionRecord->ExceptionCode == 0xc0000008) {
+        // CloseHandle 关闭了一个不存在的句柄 内核就会触发异常
+        return EXCEPTION_CONTINUE_SEARCH;//异常已处理
+    }else{
+        // 获取异常对象指针
+        std::cout << std::hex << pExcepInfo->ExceptionRecord->ExceptionCode << std::endl;
+        //ULONG_PTR pExceptionObject = pExcepInfo->ExceptionRecord->ExceptionInformation[1];
+        //// 将异常对象转换为 std::exception 指针
+        //std::exception* pException = (std::exception * ) (pExceptionObject);
+        //// 获取异常信息
+        //std::cerr << "C++ 异常: " << pException->what() << std::endl;
+    }
+
+    return EXCEPTION_CONTINUE_SEARCH;//异常未处理
+}
+
 int main()
 {
-    test();
+    
+    test(); // 测试自定义节里面的函数指针变量
     _ZwSetInformationThread ZwSetInformationThread;
     _NtQueryInformationProcess NtQueryInformationProcess;
     _NtQueryObject NtQueryObject;
+    FnAddVectoredExceptionHandler MyAddVectoredExceptionHandler;
     //PROCESSINFOCLASS
     // LPDEBUG_EVENT out_debuevent;
     //DWORD testst;
     //WaitForDebugEvent(out_debuevent, 0);
     // 注册sehandler
     DWORD sehHandler = (DWORD)myExceptHandler;
+    // 参考 https://blog.csdn.net/qq_38474570/article/details/104346421 
     // 异常来获取进程上下文信息里面包含了寄存器信息，
-     // seh 实现的veh 如何实现呢？
+    //  KiUserExceptionDispatcher会调用RtlDispatchException函数来查找并调用异常处理函数，查找的顺序：
+    // 先查全局链表：VEH
+    // 再查局部链表：SEH
+    // veh 实现
+    HMODULE Kerne_hModule = GetModuleHandle(L"Kernel32.dll");
+     MyAddVectoredExceptionHandler = (FnAddVectoredExceptionHandler)::GetProcAddress(Kerne_hModule, "AddVectoredExceptionHandler");
+     //参数1表示插入VEH链的头部, 0插入到VEH链的尾部
+     // MyAddVectoredExceptionHandler(0, (_EXCEPTION_POINTERS*)&VEH_VectExcepHandler);
+     //throw("abcds");
+    // seh 实现的
     __asm {
-        push myExceptHandler
+        push sehHandler
         mov eax, fs:[0]
         push eax
         mov fs:[0],esp
     }
-
+    
     int a = 10;
       a = a / 0;
      // throw("x");  //抛出异常 myExceptHandler 函数就会被执行
@@ -207,9 +253,6 @@ int main()
     else {
         printf("ProcessDebugPort 端口 未被调试\n");
     }
-
-
-
 
 
     HMODULE hmodule = LoadLibraryA("ntdll.dll");
@@ -285,8 +328,8 @@ int main()
     if (hSnap == INVALID_HANDLE_VALUE) {
         printf("创建进程快照失败\n");
     }
-    PROCESSENTRY32W lpprocessentry;
-    lpprocessentry.dwSize = sizeof(PROCESSENTRY32W);
+    PROCESSENTRY32 lpprocessentry;
+    lpprocessentry.dwSize = sizeof(PROCESSENTRY32);
     Process32First(hSnap, &lpprocessentry);
     do {
         if (wcscmp(L"explorer.exe", lpprocessentry.szExeFile) == 0) {
@@ -294,6 +337,10 @@ int main()
                 printf("程序可能被调试了\n");
             }
 
+        }
+        else if(wcscmp(L"vmtoolsd.exe", lpprocessentry.szExeFile) == 0){
+            // 虚拟机进程
+            printf("程序在虚拟机中运行\n");
         }
     } while (Process32Next(hSnap, &lpprocessentry));
     if (hSnap != 0) {
@@ -315,7 +362,7 @@ int main()
     for (ULONG i = 0; i < typesInfo->numberOfTypesInfo; i++) {
         if (wcscmp(L"DebugObject", typeinfo->TypeName.Buffer) == 0) {
             if (typeinfo->TotalNumberOfObjects > 0) {
-                printf("%d", typeinfo->TotalNumberOfObjects);
+                printf("调试对象数量：%d ", typeinfo->TotalNumberOfObjects);
                 printf("检测到调试对象\n");
                 break;
             }
@@ -370,8 +417,72 @@ int main()
         pfirstHeader++;
     }
     // vmware 检测
+    // 1 遍历进程快照判断有没有 vmtoolsd.exe 进程 "VBoxService.exe", "VBoxTray.exe", "vmware.exe", "vmtoolsd.exe" 
+    // 2 判断 文件是否存在 C:\\Program Files\\VMware\\VMware Tools\\vmtoolsd.exe
+    // 3 判断系统服务 有没有
+    // 4 其它很多方式
+    // 更多vmware 检测参考 https://github.com/ZanderChang/anti-sandbox
+    // 遍历系统服务
+    // 参考 https://github.com/enginestein/Virus-Collection/tree/main/Others/nesebot1.2/net.cpp#L196-L247
+    SC_HANDLE hSchandle = OpenSCManager(NULL, NULL, SC_MANAGER_ALL_ACCESS);
+    
+    DWORD bytesNeeded = 0, servicesreturned, resumehandle = 0;
+    // 第一次调用 EnumServicesStatusW 以获取所需的缓冲区大小
+    EnumServicesStatus(hSchandle, SERVICE_WIN32, SERVICE_STATE_ALL, NULL, 0, &bytesNeeded, &servicesreturned, &resumehandle);
+    if (GetLastError() != ERROR_MORE_DATA && bytesNeeded <= 0) {
+        return 0;
+    }
+    
+        LPENUM_SERVICE_STATUS pPssp = (LPENUM_SERVICE_STATUS)malloc(bytesNeeded);
+    ZeroMemory(pPssp, bytesNeeded);
+    // 第二次调用 EnumServicesStatusW 以获取服务信息
+    EnumServicesStatus(hSchandle, SERVICE_WIN32, SERVICE_STATE_ALL, 
+        pPssp, bytesNeeded, &bytesNeeded,
+        &servicesreturned, &resumehandle);
 
+    for (int i = 0; i < (int)servicesreturned; i++) {
 
+        switch (pPssp[i].ServiceStatus.dwCurrentState) {
+            case SERVICE_STOPPED:
+                //sprintf(svcState, "    Stopped");
+                break;
+            case SERVICE_START_PENDING:
+                //sprintf(svcState, "   Starting");
+                break;
+            case SERVICE_STOP_PENDING:
+                // sprintf(svcState, "    Stoping");
+                break;
+            case SERVICE_RUNNING:
+                //sprintf(svcState, "    Running");
+                break;
+            case SERVICE_CONTINUE_PENDING:
+                //sprintf(svcState, " Continuing");
+                break;
+            case SERVICE_PAUSE_PENDING:
+                //sprintf(svcState, "    Pausing");
+                break;
+            case SERVICE_PAUSED:
+                //sprintf(svcState, "     Paused");
+                break;
+            default:
+                //sprintf(svcState, "    Unknown");
+                break;
+        }
+        
+         // std::string vmstr;
+        // vmstr = "VMware";
+        /*std::wstring vmwarestr = std::wstring(vmstr.begin(), vmstr.end());
+        if (wcsicmp(pPssp[i].lpDisplayName, vmwarestr.c_str()) == 0) {
+            std::wcout << pPssp[i].lpDisplayName << "------------ " << pPssp[i].lpServiceName << std::endl;
+        }*/
+       
+       
+    }
+
+    
+    // 关闭服务句柄
+    CloseServiceHandle(hSchandle);
+    
     system("pause");
     return 0;
 }
