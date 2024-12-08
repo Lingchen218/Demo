@@ -177,7 +177,7 @@ LONG NTAPI VEH_VectExcepHandler(PEXCEPTION_POINTERS pExcepInfo)
 
 int main()
 {
-    
+
     test(); // 测试自定义节里面的函数指针变量
     _ZwSetInformationThread ZwSetInformationThread;
     _NtQueryInformationProcess NtQueryInformationProcess;
@@ -198,7 +198,7 @@ int main()
     HMODULE Kerne_hModule = GetModuleHandle(L"Kernel32.dll");
      MyAddVectoredExceptionHandler = (FnAddVectoredExceptionHandler)::GetProcAddress(Kerne_hModule, "AddVectoredExceptionHandler");
      //参数1表示插入VEH链的头部, 0插入到VEH链的尾部
-     // MyAddVectoredExceptionHandler(0, (_EXCEPTION_POINTERS*)&VEH_VectExcepHandler);
+      MyAddVectoredExceptionHandler(0, (_EXCEPTION_POINTERS*)&VEH_VectExcepHandler);
      //throw("abcds");
     // seh 实现的
     __asm {
@@ -293,12 +293,13 @@ int main()
     else {
         printf("ProcessDebugFlags 未被调试\n");
     }
-    __try {
+    
+    try {
         // 关闭一个不存在的句柄 如果被调试 就会触发异常
         // vs debug时会抛出异常，用户正常运行时 不会有异常问题
         CloseHandle((HANDLE)0x112121);
     }
-    __except (1) {
+    catch (std::exception e) {
         printf("CloseHandle 检测到被调试\n");
     }
 
@@ -425,7 +426,6 @@ int main()
     // 遍历系统服务
     // 参考 https://github.com/enginestein/Virus-Collection/tree/main/Others/nesebot1.2/net.cpp#L196-L247
     SC_HANDLE hSchandle = OpenSCManager(NULL, NULL, SC_MANAGER_ALL_ACCESS);
-    
     DWORD bytesNeeded = 0, servicesreturned, resumehandle = 0;
     // 第一次调用 EnumServicesStatusW 以获取所需的缓冲区大小
     EnumServicesStatus(hSchandle, SERVICE_WIN32, SERVICE_STATE_ALL, NULL, 0, &bytesNeeded, &servicesreturned, &resumehandle);
@@ -468,18 +468,18 @@ int main()
                 //sprintf(svcState, "    Unknown");
                 break;
         }
-        
-         // std::string vmstr;
-        // vmstr = "VMware";
-        /*std::wstring vmwarestr = std::wstring(vmstr.begin(), vmstr.end());
-        if (wcsicmp(pPssp[i].lpDisplayName, vmwarestr.c_str()) == 0) {
-            std::wcout << pPssp[i].lpDisplayName << "------------ " << pPssp[i].lpServiceName << std::endl;
-        }*/
-       
-       
+        // std::wcout << pPssp[i].lpDisplayName << "------------ " << pPssp[i].lpServiceName << std::endl;
+          std::string vmstr = "VMware";
+         //std::wcout << pPssp[i].lpDisplayName << "------------ " << pPssp[i].lpServiceName << std::endl;
+        std::wstring vmwarestr = std::wstring(vmstr.begin(), vmstr.end());
+        if (wcsstr(pPssp[i].lpDisplayName, vmwarestr.c_str()) != 0) {
+            // std::wcout << pPssp[i].lpDisplayName  << std::endl;
+            printf("检测到虚拟机服务\n");
+            break;
+        }
+
     }
 
-    
     // 关闭服务句柄
     CloseServiceHandle(hSchandle);
     
