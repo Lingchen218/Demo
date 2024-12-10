@@ -122,7 +122,7 @@ typedef enum _OBJECT_INFORMATION_CLASS {
     OBJECT_TYPE_INFORMATION typeInfo[1];
  }OBJECT_TYPES_INFORMATION,*POBJECT_TYPES_INFORMATION;
 
-EXCEPTION_DISPOSITION WINAPI myExceptHandler(
+EXCEPTION_DISPOSITION WINAPI SEH_myExceptHandler(
     struct _EXCEPTION_RECORD* ExceptionRecord,
     PVOID EstablisherFrame,
     PCONTEXT pcontext,
@@ -149,6 +149,7 @@ LONG NTAPI VEH_VectExcepHandler(PEXCEPTION_POINTERS pExcepInfo)
 {
     MessageBox(NULL, L"VEH异常处理函数执行了...", L"VEH异常", MB_OK);
 
+    
     if (pExcepInfo->ExceptionRecord->ExceptionCode == 0xC0000094)//除0异常
     {
         //将除数修改为1
@@ -161,8 +162,15 @@ LONG NTAPI VEH_VectExcepHandler(PEXCEPTION_POINTERS pExcepInfo)
     }
     else if (pExcepInfo->ExceptionRecord->ExceptionCode == 0xc0000008) {
         // CloseHandle 关闭了一个不存在的句柄 内核就会触发异常
-        return EXCEPTION_CONTINUE_SEARCH;//异常已处理
-    }else{
+        return EXCEPTION_CONTINUE_SEARCH;//异常未处理
+    }
+    else if (pExcepInfo->ExceptionRecord->ExceptionCode ==  0xc0000096) {
+        // 这里异常是？虚拟机检测的异常
+        
+        pExcepInfo->ContextRecord->Eip = pExcepInfo->ContextRecord->Eip + 1;
+        return EXCEPTION_CONTINUE_EXECUTION;//异常已处理
+    }
+    else {
         // 获取异常对象指针
         std::cout << std::hex << pExcepInfo->ExceptionRecord->ExceptionCode << std::endl;
         //ULONG_PTR pExceptionObject = pExcepInfo->ExceptionRecord->ExceptionInformation[1];
@@ -175,9 +183,124 @@ LONG NTAPI VEH_VectExcepHandler(PEXCEPTION_POINTERS pExcepInfo)
     return EXCEPTION_CONTINUE_SEARCH;//异常未处理
 }
 
+DWORD g_InitalizeFunAddr;
+BYTE IninializeFun[5] = { 0 };
+
+
+DWORD WINAPI threadProc(LPVOID lparam) {
+    while (true) {
+        DWORD newcode = *(DWORD*)g_InitalizeFunAddr;
+        if (newcode  != *(DWORD*)IninializeFun) {
+            std::cout << "这孙子要附加进程" << std::endl;
+
+            // 把内存改回去
+            DWORD oldProtect = 0;
+            VirtualProtect(
+                (LPVOID)g_InitalizeFunAddr, 5, PAGE_EXECUTE_READWRITE, &oldProtect);
+            memcpy((LPVOID)g_InitalizeFunAddr, IninializeFun, 5);
+            VirtualProtect(
+                (LPVOID)g_InitalizeFunAddr, 5, oldProtect, &oldProtect);
+        }
+    }
+}
+BOOL SaveLdrInitializeCode()
+{
+    DWORD functadd = (DWORD)GetProcAddress(GetModuleHandleA("ntdll.dll"), "LdrInitializeThunk");
+    g_InitalizeFunAddr = functadd;
+    memcpy(IninializeFun, (void*)g_InitalizeFunAddr, 5);
+    return true;
+}
+// 
+BOOL hookdbgBreakPoint() {
+
+    BYTE* functadd = (BYTE*)GetProcAddress(GetModuleHandleA("ntdll.dll"), "DbgBreakPoint");
+    // 把内存改回去
+    DWORD oldProtect = 0;
+    VirtualProtect(
+        (LPVOID)functadd, 5, PAGE_EXECUTE_READWRITE, &oldProtect);
+    // memcpy((LPVOID)g_InitalizeFunAddr, IninializeFun, 5);
+    functadd[0] = 0xc3;
+
+    VirtualProtect(
+        (LPVOID)functadd, 5, oldProtect, &oldProtect);
+
+    return true;
+}
+
+BOOL checkvm() {
+    // 这段只有虚拟机会异常，会调用上面的 VEH_VectExcepHandler 函数
+    __try {
+        __asm {
+            push edx
+            push ecx
+            push ebx
+            mov eax, 'VMXh'
+            mov ebx, 0
+            mov ecx, 10
+            mov edx, 'VX'
+            in eax, dx
+            //cmp ebx, 'VMXh'
+            pop ebx
+            pop ecx
+            pop edx
+        }
+    }
+    __except (1) {
+        return true;
+    }
+    return false;
+    
+}
+
+BOOL checkDbgWindow() {
+    HWND hwnd = FindWindow(NULL, L"x3dbg");
+    if (hwnd) {
+        std::cout << "检测到x32dbg调试器" << std::endl;
+        return true;
+    }
+    return false;
+}
+
+void m_Exitprocess() {
+    std::cout << "检测到单步调试器" << std::endl;
+    ExitProcess(0);
+}
+void checkTFflag() {
+    // 单步执行这里 就会终止进程
+    DWORD add = (DWORD)m_Exitprocess;
+    __try {
+        __asm {
+            pushfd
+            or dword ptr ss : [esp] , 0x100
+            popfd
+            nop
+            jmp add
+        }
+    }
+    __except (1) {
+        std::cout << "没有检测到单步调试器" << std::endl;
+    }
+    
+}
+BOOL CALLBACK EnumChildProc(
+    _In_ HWND   hwnd,
+    _In_ LPARAM lParam
+) {
+    wchar_t str[0x100] = { 0 };
+    // MultiByteToWideChar 窄字节转宽字节
+    // WideCharToMultiByte 宽字节转窄字节
+    SendMessage(hwnd, WM_GETTEXT, 0x100, (LPARAM)str);
+    // printf("窗口名称是：%s\n", str);
+    if (str != L"") {
+        std::wcout << "窗口名称是: " << str ;
+    }
+    
+    return true;
+}
 int main()
 {
 
+    
     test(); // 测试自定义节里面的函数指针变量
     _ZwSetInformationThread ZwSetInformationThread;
     _NtQueryInformationProcess NtQueryInformationProcess;
@@ -188,7 +311,7 @@ int main()
     //DWORD testst;
     //WaitForDebugEvent(out_debuevent, 0);
     // 注册sehandler
-    DWORD sehHandler = (DWORD)myExceptHandler;
+    DWORD sehHandler = (DWORD)SEH_myExceptHandler;
     // 参考 https://blog.csdn.net/qq_38474570/article/details/104346421 
     // 异常来获取进程上下文信息里面包含了寄存器信息，
     //  KiUserExceptionDispatcher会调用RtlDispatchException函数来查找并调用异常处理函数，查找的顺序：
@@ -208,8 +331,14 @@ int main()
         mov fs:[0],esp
     }
     
-    int a = 10;
-      a = a / 0;
+    // 构造除0异常
+    __asm
+    {
+        xor edx, edx
+        xor ecx, ecx
+        mov eax, 0x10
+        idiv ecx // EDX:EAX 除以 ECX
+    }
      // throw("x");  //抛出异常 myExceptHandler 函数就会被执行
       // 解绑异常
       __asm {
@@ -343,6 +472,10 @@ int main()
             // 虚拟机进程
             printf("程序在虚拟机中运行\n");
         }
+        else if (wcscmp(L"x32dbg.exe", lpprocessentry.szExeFile) == 0) {
+            // x32dbg 调试工具
+            printf("检测到 x32dbg 调试工具\n");
+        }
     } while (Process32Next(hSnap, &lpprocessentry));
     if (hSnap != 0) {
         CloseHandle(hSnap);
@@ -425,6 +558,7 @@ int main()
     // 更多vmware 检测参考 https://github.com/ZanderChang/anti-sandbox
     // 遍历系统服务
     // 参考 https://github.com/enginestein/Virus-Collection/tree/main/Others/nesebot1.2/net.cpp#L196-L247
+    // 查询服务 需要已管理员运行
     SC_HANDLE hSchandle = OpenSCManager(NULL, NULL, SC_MANAGER_ALL_ACCESS);
     DWORD bytesNeeded = 0, servicesreturned, resumehandle = 0;
     // 第一次调用 EnumServicesStatusW 以获取所需的缓冲区大小
@@ -482,7 +616,39 @@ int main()
 
     // 关闭服务句柄
     CloseServiceHandle(hSchandle);
+    std::cout << " dao zheli" << std::endl;
+    checkvm();
+   
     
+    //  附加调试打开进程，已经附加了，后面就不能有其它调试器附加了
+
+    // strong od 反反附加
+    SaveLdrInitializeCode();
+    hookdbgBreakPoint();
+
+    // 单步调试检测
+    checkTFflag();
+
+    //获取桌面窗口所有的子窗户，获取所有的标题，包括浏览器标题
+    HWND dDesktop = GetDesktopWindow();
+    HWND deskSubwindow = GetWindow(dDesktop, GW_CHILD);
+    while (deskSubwindow) {
+        // char str[0x100] = { 0 };
+        // GetWindowText(deskSubwindow, (LPWSTR)str, 0x100);
+        EnumChildWindows(deskSubwindow, EnumChildProc, NULL);
+        deskSubwindow =  GetWindow(deskSubwindow, GW_HWNDNEXT);
+        
+    }
+    
+
+
+    // 创建线程
+    // HANDLE hThread = CreateThread(NULL, 0, threadProc, 0, 0, NULL);
+
+    /*while (true) {
+        std::cout << "xxxxxxd" << std::endl;
+        Sleep(3000);
+    }*/
     system("pause");
     return 0;
 }
